@@ -1,14 +1,15 @@
-import type { Plugin } from 'vite';
+import type { IncomingMessage, ServerResponse } from 'node:http';
+import type { Plugin, PreviewServer, ViteDevServer } from 'vite';
 import { runSimulation, type SimulationRequest, type SimulationResult } from './simulationEngine.js';
 import { ValidationError } from './validateUrl.js';
 
-function sendJson(res: any, status: number, payload: unknown): void {
+function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.statusCode = status;
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify(payload));
 }
 
-function readBody(req: any): Promise<string> {
+function readBody(req: IncomingMessage): Promise<string> {
   return new Promise((resolve, reject) => {
     let data = '';
     req.on('data', (chunk: Buffer) => {
@@ -23,7 +24,7 @@ function readBody(req: any): Promise<string> {
   });
 }
 
-async function handleSimulate(req: any, res: any): Promise<void> {
+async function handleSimulate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
     sendJson(res, 405, { error: 'Method not allowed. Use POST.' });
     return;
@@ -50,13 +51,13 @@ async function handleSimulate(req: any, res: any): Promise<void> {
   }
 }
 
-function isSimulateRequest(req: any): boolean {
+function isSimulateRequest(req: IncomingMessage): boolean {
   const url = (req.url || '') as string;
   return url === '/api/simulate' || url.startsWith('/api/simulate?');
 }
 
-function attachMiddleware(server: any): void {
-  server.middlewares.use((req: any, res: any, next: () => void) => {
+function attachMiddleware(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use((req, res, next) => {
     if (req.method === 'POST' && isSimulateRequest(req)) {
       handleSimulate(req, res).catch(() => {
         if (!res.headersSent) sendJson(res, 500, { error: 'Simulation engine crashed.' });

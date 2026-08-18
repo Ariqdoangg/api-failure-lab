@@ -2,7 +2,8 @@ import { EndpointInput } from './EndpointInput';
 import { ScenarioSelector } from './ScenarioSelector';
 import { DelayControl } from './DelayControl';
 import { RunControls } from './RunControls';
-import { RequestBodyEditor, isBodyMethod } from './RequestBodyEditor';
+import { RequestBodyEditor } from './RequestBodyEditor';
+import { isBodyMethod } from '@/utils/requestBody';
 import type { Scenario, HttpMethod } from '@/types';
 
 interface RequestConfigProps {
