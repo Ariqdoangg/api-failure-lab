@@ -33,6 +33,72 @@ export interface SimulationResult {
 const UPSTREAM_TIMEOUT_MS = 12_000;
 const MAX_DELAY_MS = 5_000;
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isScenario(value: unknown): value is Scenario {
+  return value === 'normal' || value === '404' || value === '429' || value === '500' || value === 'slow';
+}
+
+function isJsonCompatible(value: unknown, seen = new Set<object>()): boolean {
+  if (value === null || typeof value === 'string' || typeof value === 'boolean') return true;
+  if (typeof value === 'number') return Number.isFinite(value);
+  if (typeof value !== 'object' || seen.has(value)) return false;
+
+  const prototype = Object.getPrototypeOf(value);
+  if (!Array.isArray(value) && prototype !== Object.prototype && prototype !== null) return false;
+
+  seen.add(value);
+  const values = Array.isArray(value) ? value : Object.values(value);
+  const compatible = values.every((entry) => isJsonCompatible(entry, seen));
+  seen.delete(value);
+  return compatible;
+}
+
+export function decodeSimulationRequest(value: unknown): SimulationRequest {
+  if (!isRecord(value)) {
+    throw new ValidationError('Request body must be a JSON object.');
+  }
+
+  if (typeof value.url !== 'string' || value.url.trim() === '') {
+    throw new ValidationError('url must be a non-empty string.');
+  }
+
+  if (typeof value.method !== 'string' || !ALLOWED_METHODS.has(value.method)) {
+    throw new ValidationError(
+      `Unsupported HTTP method: ${String(value.method)}. Allowed: GET, POST, PUT, PATCH, DELETE.`,
+    );
+  }
+
+  if (!isScenario(value.scenario)) {
+    throw new ValidationError(
+      `Unsupported scenario: ${String(value.scenario)}. Allowed: normal, 404, 429, 500, slow.`,
+    );
+  }
+
+  if (
+    typeof value.delay !== 'number' ||
+    !Number.isFinite(value.delay) ||
+    value.delay < 0 ||
+    value.delay > MAX_DELAY_MS
+  ) {
+    throw new ValidationError(`delay must be a finite number between 0 and ${MAX_DELAY_MS}.`);
+  }
+
+  if (value.body !== undefined && !isJsonCompatible(value.body)) {
+    throw new ValidationError('body must be a JSON-compatible value.');
+  }
+
+  return {
+    url: value.url,
+    method: value.method,
+    scenario: value.scenario,
+    delay: value.delay,
+    body: value.body,
+  };
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -107,17 +173,18 @@ async function fetchUpstream(
 }
 
 export async function runSimulation(req: SimulationRequest): Promise<SimulationResult> {
-  const scenario = req.scenario as Scenario;
-  const delay = clampDelay(req.delay);
-  const endpoint = (req.url || '').trim();
-  const method = validateMethod(req.method);
+  const request = decodeSimulationRequest(req);
+  const scenario = request.scenario;
+  const delay = clampDelay(request.delay);
+  const endpoint = request.url.trim();
+  const method = validateMethod(request.method);
 
   const validation = validateTargetUrl(endpoint);
   if (!validation.ok) {
     throw new ValidationError(validation.reason || 'Invalid URL.');
   }
 
-  const { bodyString, hasBody } = buildBody(req.body, method);
+  const { bodyString, hasBody } = buildBody(request.body, method);
   const requestBodyForResult = hasBody && bodyString ? bodyString : undefined;
 
   const start = performance.now();

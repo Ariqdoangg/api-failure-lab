@@ -1,6 +1,10 @@
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import type { Plugin, PreviewServer, ViteDevServer } from 'vite';
-import { runSimulation, type SimulationRequest, type SimulationResult } from './simulationEngine.js';
+import {
+  decodeSimulationRequest,
+  runSimulation,
+  type SimulationResult,
+} from './simulationEngine.js';
 import { ValidationError } from './validateUrl.js';
 
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
@@ -26,21 +30,23 @@ function readBody(req: IncomingMessage): Promise<string> {
 
 async function handleSimulate(req: IncomingMessage, res: ServerResponse): Promise<void> {
   if (req.method !== 'POST') {
+    res.setHeader('Allow', 'POST');
     sendJson(res, 405, { error: 'Method not allowed. Use POST.' });
     return;
   }
 
-  let payload: SimulationRequest;
+  let payload: unknown;
   try {
     const raw = await readBody(req);
-    payload = JSON.parse(raw) as SimulationRequest;
+    payload = JSON.parse(raw) as unknown;
   } catch {
     sendJson(res, 400, { error: 'Invalid JSON request body.' });
     return;
   }
 
   try {
-    const result: SimulationResult = await runSimulation(payload);
+    const request = decodeSimulationRequest(payload);
+    const result: SimulationResult = await runSimulation(request);
     sendJson(res, 200, result);
   } catch (err) {
     if (err instanceof ValidationError) {
@@ -56,16 +62,23 @@ function isSimulateRequest(req: IncomingMessage): boolean {
   return url === '/api/simulate' || url.startsWith('/api/simulate?');
 }
 
-function attachMiddleware(server: ViteDevServer | PreviewServer): void {
-  server.middlewares.use((req, res, next) => {
-    if (req.method === 'POST' && isSimulateRequest(req)) {
-      handleSimulate(req, res).catch(() => {
-        if (!res.headersSent) sendJson(res, 500, { error: 'Simulation engine crashed.' });
-      });
-      return;
-    }
+export function simulationMiddleware(
+  req: IncomingMessage,
+  res: ServerResponse,
+  next: () => void,
+): void {
+  if (!isSimulateRequest(req)) {
     next();
+    return;
+  }
+
+  handleSimulate(req, res).catch(() => {
+    if (!res.headersSent) sendJson(res, 500, { error: 'Simulation engine crashed.' });
   });
+}
+
+function attachMiddleware(server: ViteDevServer | PreviewServer): void {
+  server.middlewares.use(simulationMiddleware);
 }
 
 export function simulationPlugin(): Plugin {
