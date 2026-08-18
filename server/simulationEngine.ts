@@ -32,6 +32,8 @@ export interface SimulationResult {
 
 const UPSTREAM_TIMEOUT_MS = 12_000;
 const MAX_DELAY_MS = 5_000;
+const MAX_UPSTREAM_REDIRECTS = 5;
+const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -149,24 +151,83 @@ async function fetchUpstream(
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), UPSTREAM_TIMEOUT_MS);
   try {
-    const init: RequestInit = { method, signal: controller.signal, redirect: 'follow' };
-    if (hasBody && bodyString !== undefined) {
-      init.headers = { 'content-type': 'application/json' };
-      init.body = bodyString;
+    let currentUrl = new URL(url);
+    currentUrl.hash = '';
+    let currentMethod = method;
+    let currentHasBody = hasBody;
+    let redirectsFollowed = 0;
+    const visitedUrls = new Set([currentUrl.href]);
+
+    while (true) {
+      const init: RequestInit = {
+        method: currentMethod,
+        signal: controller.signal,
+        redirect: 'manual',
+      };
+      if (currentHasBody && bodyString !== undefined) {
+        init.headers = { 'content-type': 'application/json' };
+        init.body = bodyString;
+      }
+
+      const res = await fetch(currentUrl, init);
+      const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null;
+
+      if (location === null) {
+        const text = await res.text();
+        const headers: Record<string, string> = {};
+        res.headers.forEach((value, key) => {
+          headers[key.toLowerCase()] = value;
+        });
+        return {
+          status: res.status,
+          statusText: res.statusText || '',
+          headers,
+          body: text,
+          ok: res.ok,
+        };
+      }
+
+      let redirectUrl: URL;
+      try {
+        redirectUrl = new URL(location, currentUrl);
+        redirectUrl.hash = '';
+      } catch {
+        await res.body?.cancel();
+        throw new ValidationError('Upstream returned an invalid redirect destination.');
+      }
+
+      const redirectValidation = await validateTargetUrlDns(redirectUrl.href);
+      if (!redirectValidation.ok) {
+        await res.body?.cancel();
+        throw new ValidationError(
+          `Redirect target blocked: ${redirectValidation.reason || 'Invalid URL.'}`,
+        );
+      }
+
+      if (visitedUrls.has(redirectUrl.href)) {
+        await res.body?.cancel();
+        throw new ValidationError('Upstream redirect loop detected.');
+      }
+      if (redirectsFollowed >= MAX_UPSTREAM_REDIRECTS) {
+        await res.body?.cancel();
+        throw new ValidationError(
+          `Upstream exceeded the limit of ${MAX_UPSTREAM_REDIRECTS} redirects.`,
+        );
+      }
+
+      await res.body?.cancel();
+      visitedUrls.add(redirectUrl.href);
+      redirectsFollowed += 1;
+
+      if (
+        res.status === 303 ||
+        ((res.status === 301 || res.status === 302) && currentMethod === 'POST')
+      ) {
+        currentMethod = 'GET';
+        currentHasBody = false;
+      }
+      currentUrl = redirectUrl;
     }
-    const res = await fetch(url, init);
-    const text = await res.text();
-    const headers: Record<string, string> = {};
-    res.headers.forEach((value, key) => {
-      headers[key.toLowerCase()] = value;
-    });
-    return {
-      status: res.status,
-      statusText: res.statusText || '',
-      headers,
-      body: text,
-      ok: res.ok,
-    };
   } finally {
     clearTimeout(timer);
   }
@@ -281,6 +342,8 @@ export async function runSimulation(req: SimulationRequest): Promise<SimulationR
       delay,
     };
   } catch (err) {
+    if (err instanceof ValidationError) throw err;
+
     const isTimeout = err instanceof Error && err.name === 'AbortError';
     return {
       status: 0,

@@ -101,7 +101,6 @@ describe('validateTargetUrl', () => {
 
   describe('address range hardening', () => {
     it.todo('pins validated DNS results to prevent DNS rebinding between validation and connection');
-    it.todo('revalidates every redirect target before following it');
 
     it('rejects IPv4-mapped IPv6 addresses when the embedded IPv4 address is blocked', () => {
       expect(validateTargetUrl('http://[::ffff:127.0.0.1]/api')).toMatchObject({ ok: false });
