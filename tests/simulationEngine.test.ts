@@ -1,7 +1,10 @@
 import { once } from 'node:events';
 import { createServer, type Server } from 'node:http';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { runSimulation } from '../server/simulationEngine.js';
+import {
+  MAX_UPSTREAM_RESPONSE_BODY_BYTES,
+  runSimulation,
+} from '../server/simulationEngine.js';
 import { ValidationError } from '../server/validateUrl.js';
 
 const dnsMocks = vi.hoisted(() => ({
@@ -61,6 +64,41 @@ beforeAll(async () => {
       body,
     });
     response.setHeader('connection', 'close');
+
+    if (request.url === '/small-response') {
+      const responseBody = JSON.stringify({ ok: true });
+      response.writeHead(200, {
+        'content-type': 'application/json',
+        'content-length': Buffer.byteLength(responseBody),
+      });
+      response.end(responseBody);
+      return;
+    }
+
+    if (request.url === '/max-size-response') {
+      response.writeHead(200, {
+        'content-type': 'text/plain',
+        'content-length': MAX_UPSTREAM_RESPONSE_BODY_BYTES,
+      });
+      response.end(Buffer.alloc(MAX_UPSTREAM_RESPONSE_BODY_BYTES, 97));
+      return;
+    }
+
+    if (request.url === '/oversized-declared') {
+      response.writeHead(200, {
+        'content-type': 'text/plain',
+        'content-length': MAX_UPSTREAM_RESPONSE_BODY_BYTES + 1,
+      });
+      response.end('not read');
+      return;
+    }
+
+    if (request.url === '/oversized-chunked') {
+      response.writeHead(200, { 'content-type': 'text/plain' });
+      response.write(Buffer.alloc(MAX_UPSTREAM_RESPONSE_BODY_BYTES, 97));
+      response.end('b');
+      return;
+    }
 
     if (request.url === '/non-2xx') {
       response.writeHead(422, { 'content-type': 'application/json' });
@@ -155,6 +193,67 @@ afterAll(async () => {
 });
 
 describe('runSimulation upstream requests', () => {
+  it('preserves a small declared upstream response', async () => {
+    const result = await runSimulation({
+      url: `${upstreamOrigin}/small-response`,
+      scenario: 'normal',
+      delay: 0,
+      method: 'GET',
+    });
+
+    expect(result).toMatchObject({
+      status: 200,
+      ok: true,
+      body: JSON.stringify({ ok: true }),
+      sizeBytes: Buffer.byteLength(JSON.stringify({ ok: true })),
+    });
+  });
+
+  it('accepts an upstream response exactly at the byte limit', async () => {
+    const result = await runSimulation({
+      url: `${upstreamOrigin}/max-size-response`,
+      scenario: 'normal',
+      delay: 0,
+      method: 'GET',
+    });
+
+    expect(result.status).toBe(200);
+    expect(result.sizeBytes).toBe(MAX_UPSTREAM_RESPONSE_BODY_BYTES);
+    expect(Buffer.byteLength(result.body)).toBe(MAX_UPSTREAM_RESPONSE_BODY_BYTES);
+  });
+
+  it('rejects an upstream response with an oversized declared Content-Length', async () => {
+    const result = await runSimulation({
+      url: `${upstreamOrigin}/oversized-declared`,
+      scenario: 'normal',
+      delay: 0,
+      method: 'GET',
+    });
+
+    expect(result).toMatchObject({
+      status: 0,
+      body: '',
+      sizeBytes: 0,
+      error: `Upstream response body exceeds the ${MAX_UPSTREAM_RESPONSE_BODY_BYTES}-byte limit.`,
+    });
+  });
+
+  it('rejects a chunked upstream response once it crosses the byte limit', async () => {
+    const result = await runSimulation({
+      url: `${upstreamOrigin}/oversized-chunked`,
+      scenario: 'normal',
+      delay: 0,
+      method: 'GET',
+    });
+
+    expect(result).toMatchObject({
+      status: 0,
+      body: '',
+      sizeBytes: 0,
+      error: `Upstream response body exceeds the ${MAX_UPSTREAM_RESPONSE_BODY_BYTES}-byte limit.`,
+    });
+  });
+
   it('rejects a hostname resolving to a non-public address before fetch', async () => {
     dnsMocks.lookup.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
 

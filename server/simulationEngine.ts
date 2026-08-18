@@ -33,7 +33,10 @@ export interface SimulationResult {
 const UPSTREAM_TIMEOUT_MS = 12_000;
 const MAX_DELAY_MS = 5_000;
 const MAX_UPSTREAM_REDIRECTS = 5;
+export const MAX_UPSTREAM_RESPONSE_BODY_BYTES = 1024 * 1024;
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
+
+class UpstreamResponseTooLargeError extends Error {}
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
@@ -115,6 +118,54 @@ function byteLength(str: string): number {
   return Buffer.byteLength(str, 'utf8');
 }
 
+function parseContentLength(value: string | null): bigint | undefined {
+  if (value === null || !/^\d+$/.test(value)) return undefined;
+  return BigInt(value);
+}
+
+async function readUpstreamBody(
+  response: Response,
+  controller: AbortController,
+): Promise<string> {
+  const contentLength = parseContentLength(response.headers.get('content-length'));
+  if (
+    contentLength !== undefined &&
+    contentLength > BigInt(MAX_UPSTREAM_RESPONSE_BODY_BYTES)
+  ) {
+    controller.abort();
+    await response.body?.cancel().catch(() => undefined);
+    throw new UpstreamResponseTooLargeError(
+      `Upstream response body exceeds the ${MAX_UPSTREAM_RESPONSE_BODY_BYTES}-byte limit.`,
+    );
+  }
+
+  if (response.body === null) return '';
+
+  const reader = response.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let sizeBytes = 0;
+
+  try {
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      sizeBytes += value.byteLength;
+      if (sizeBytes > MAX_UPSTREAM_RESPONSE_BODY_BYTES) {
+        controller.abort();
+        await reader.cancel().catch(() => undefined);
+        throw new UpstreamResponseTooLargeError(
+          `Upstream response body exceeds the ${MAX_UPSTREAM_RESPONSE_BODY_BYTES}-byte limit.`,
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  return Buffer.concat(chunks, sizeBytes).toString('utf8');
+}
+
 function normalizeMethod(method: string): string {
   return (method || 'GET').toUpperCase();
 }
@@ -173,7 +224,7 @@ async function fetchUpstream(
       const location = REDIRECT_STATUSES.has(res.status) ? res.headers.get('location') : null;
 
       if (location === null) {
-        const text = await res.text();
+        const text = await readUpstreamBody(res, controller);
         const headers: Record<string, string> = {};
         res.headers.forEach((value, key) => {
           headers[key.toLowerCase()] = value;
@@ -361,7 +412,9 @@ export async function runSimulation(req: SimulationRequest): Promise<SimulationR
       delay,
       error: isTimeout
         ? `Upstream request timed out after ${UPSTREAM_TIMEOUT_MS / 1000}s.`
-        : `Failed to reach upstream: ${(err as Error).message}`,
+        : err instanceof UpstreamResponseTooLargeError
+          ? err.message
+          : `Failed to reach upstream: ${(err as Error).message}`,
     };
   }
 }

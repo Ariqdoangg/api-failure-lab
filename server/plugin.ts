@@ -7,24 +7,79 @@ import {
 } from './simulationEngine.js';
 import { ValidationError } from './validateUrl.js';
 
+export const MAX_SIMULATION_REQUEST_BODY_BYTES = 256 * 1024;
+
+class PayloadTooLargeError extends Error {}
+
 function sendJson(res: ServerResponse, status: number, payload: unknown): void {
   res.statusCode = status;
   res.setHeader('content-type', 'application/json');
   res.end(JSON.stringify(payload));
 }
 
+function declaredContentLength(req: IncomingMessage): bigint | undefined {
+  const value = req.headers['content-length'];
+  if (typeof value !== 'string' || !/^\d+$/.test(value)) return undefined;
+  return BigInt(value);
+}
+
 function readBody(req: IncomingMessage): Promise<string> {
+  const contentLength = declaredContentLength(req);
+  if (
+    contentLength !== undefined &&
+    contentLength > BigInt(MAX_SIMULATION_REQUEST_BODY_BYTES)
+  ) {
+    req.pause();
+    return Promise.reject(new PayloadTooLargeError('Request body too large.'));
+  }
+
   return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', (chunk: Buffer) => {
-      data += chunk.toString();
-      if (data.length > 256 * 1024) {
-        req.destroy();
-        reject(new Error('Request body too large.'));
+    const chunks: Buffer[] = [];
+    let sizeBytes = 0;
+    let settled = false;
+
+    const cleanup = () => {
+      req.removeListener('data', onData);
+      req.removeListener('end', onEnd);
+      req.removeListener('aborted', onAborted);
+      req.removeListener('error', onError);
+    };
+    const onData = (chunk: Buffer | string) => {
+      const buffer = Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk);
+      sizeBytes += buffer.byteLength;
+      if (sizeBytes > MAX_SIMULATION_REQUEST_BODY_BYTES) {
+        settled = true;
+        chunks.length = 0;
+        cleanup();
+        req.pause();
+        reject(new PayloadTooLargeError('Request body too large.'));
+        return;
       }
-    });
-    req.on('end', () => resolve(data));
-    req.on('error', reject);
+      chunks.push(buffer);
+    };
+    const onEnd = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(Buffer.concat(chunks, sizeBytes).toString('utf8'));
+    };
+    const onAborted = () => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(new Error('Request body was aborted.'));
+    };
+    const onError = (error: Error) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      reject(error);
+    };
+
+    req.on('data', onData);
+    req.once('end', onEnd);
+    req.once('aborted', onAborted);
+    req.once('error', onError);
   });
 }
 
@@ -39,7 +94,12 @@ async function handleSimulate(req: IncomingMessage, res: ServerResponse): Promis
   try {
     const raw = await readBody(req);
     payload = JSON.parse(raw) as unknown;
-  } catch {
+  } catch (error) {
+    if (error instanceof PayloadTooLargeError) {
+      res.setHeader('connection', 'close');
+      sendJson(res, 413, { error: 'Request body too large.' });
+      return;
+    }
     sendJson(res, 400, { error: 'Invalid JSON request body.' });
     return;
   }

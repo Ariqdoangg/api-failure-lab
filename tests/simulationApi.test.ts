@@ -6,7 +6,10 @@ import {
   type Server,
 } from 'node:http';
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
-import { simulationMiddleware } from '../server/plugin.js';
+import {
+  MAX_SIMULATION_REQUEST_BODY_BYTES,
+  simulationMiddleware,
+} from '../server/plugin.js';
 
 const dnsLookup = vi.hoisted(() => vi.fn());
 
@@ -25,6 +28,20 @@ let serverPort: number;
 const upstreamFetch = vi.fn<typeof fetch>();
 
 function requestApi(method: string, rawBody?: string): Promise<ApiResponse> {
+  return requestApiChunks(
+    method,
+    rawBody === undefined ? [] : [rawBody],
+    rawBody === undefined
+      ? undefined
+      : { 'content-type': 'application/json', 'content-length': Buffer.byteLength(rawBody) },
+  );
+}
+
+function requestApiChunks(
+  method: string,
+  chunks: string[],
+  headers?: Record<string, string | number>,
+): Promise<ApiResponse> {
   return new Promise((resolve, reject) => {
     const request = sendHttpRequest(
       {
@@ -32,13 +49,7 @@ function requestApi(method: string, rawBody?: string): Promise<ApiResponse> {
         port: serverPort,
         path: '/api/simulate',
         method,
-        headers:
-          rawBody === undefined
-            ? undefined
-            : {
-                'content-type': 'application/json',
-                'content-length': Buffer.byteLength(rawBody),
-              },
+        headers,
       },
       (response) => {
         response.setEncoding('utf8');
@@ -58,7 +69,7 @@ function requestApi(method: string, rawBody?: string): Promise<ApiResponse> {
     );
 
     request.on('error', reject);
-    if (rawBody !== undefined) request.write(rawBody);
+    for (const chunk of chunks) request.write(chunk);
     request.end();
   });
 }
@@ -118,6 +129,62 @@ describe('POST /api/simulate request validation', () => {
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ status: 404, scenario: '404', simulated: true });
     expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it('accepts a valid request body exactly at the byte limit', async () => {
+    const request = {
+      url: 'https://upstream.test/resource',
+      method: 'GET',
+      scenario: '404',
+      delay: 0,
+      body: '',
+    };
+    const emptyBodyBytes = Buffer.byteLength(JSON.stringify(request));
+    request.body = 'a'.repeat(MAX_SIMULATION_REQUEST_BODY_BYTES - emptyBodyBytes);
+    const rawBody = JSON.stringify(request);
+    expect(Buffer.byteLength(rawBody)).toBe(MAX_SIMULATION_REQUEST_BODY_BYTES);
+
+    const response = await requestApi('POST', rawBody);
+
+    expect(response.status).toBe(200);
+    expect(response.body).toMatchObject({ status: 404, scenario: '404', simulated: true });
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects an oversized declared Content-Length before reading the body', async () => {
+    const response = await requestApiChunks('POST', ['{}'], {
+      'content-type': 'application/json',
+      'content-length': MAX_SIMULATION_REQUEST_BODY_BYTES + 1,
+    });
+
+    expect(response.status).toBe(413);
+    expect(response.body).toEqual({ error: 'Request body too large.' });
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it('rejects a chunked request once its body crosses the byte limit', async () => {
+    const response = await requestApiChunks(
+      'POST',
+      ['{"body":"', `${'a'.repeat(MAX_SIMULATION_REQUEST_BODY_BYTES)}"}`],
+      { 'content-type': 'application/json' },
+    );
+
+    expect(response.status).toBe(413);
+    expect(response.body).toEqual({ error: 'Request body too large.' });
+    expect(upstreamFetch).not.toHaveBeenCalled();
+  });
+
+  it('counts multibyte request content by UTF-8 bytes', async () => {
+    const rawBody = JSON.stringify({ value: '🚀'.repeat(70_000) });
+    expect(rawBody.length).toBeLessThan(MAX_SIMULATION_REQUEST_BODY_BYTES);
+    expect(Buffer.byteLength(rawBody)).toBeGreaterThan(MAX_SIMULATION_REQUEST_BODY_BYTES);
+
+    const response = await requestApiChunks('POST', [rawBody], {
+      'content-type': 'application/json',
+    });
+
+    expect(response.status).toBe(413);
+    expect(response.body).toEqual({ error: 'Request body too large.' });
   });
 
   it('rejects malformed JSON', async () => {
