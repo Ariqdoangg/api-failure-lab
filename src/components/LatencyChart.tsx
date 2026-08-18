@@ -50,7 +50,7 @@ const TONE_STROKE: Record<string, string> = {
 export function LatencyChart({ entries }: LatencyChartProps) {
   const [hoverIdx, setHoverIdx] = useState<number | null>(null);
 
-  const { points, width, yMax, yTicks, plotWidth, plotHeight } = useMemo(() => {
+  const { points, width, yMax, yTicks, plotHeight } = useMemo(() => {
     const w = 1000;
     const pw = w - PADDING.left - PADDING.right;
     const ph = CHART_HEIGHT - PADDING.top - PADDING.bottom;
@@ -71,7 +71,7 @@ export function LatencyChart({ entries }: LatencyChartProps) {
       ticks.push((yMaxRounded / Y_TICKS) * i);
     }
 
-    return { points: pts, width: w, yMax: yMaxRounded, yTicks: ticks, plotWidth: pw, plotHeight: ph };
+    return { points: pts, width: w, yMax: yMaxRounded, yTicks: ticks, plotHeight: ph };
   }, [entries]);
 
   if (entries.length === 0) return null;

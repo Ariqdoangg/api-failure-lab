@@ -1,5 +1,5 @@
 import type { HttpMethod } from '@/types';
-import { tryParseJson, prettyPrintJson } from '@/utils/format';
+import { isBodyMethod } from '@/utils/requestBody';
 
 interface RequestBodyEditorProps {
   method: HttpMethod;
@@ -9,23 +9,8 @@ interface RequestBodyEditorProps {
   error?: string | null;
 }
 
-export const DEFAULT_BODY = `{
-  "title": "API Failure Lab",
-  "status": "testing"
-}`;
-
-const BODY_METHODS: HttpMethod[] = ['POST', 'PUT', 'PATCH'];
-
-export function isBodyMethod(method: HttpMethod): boolean {
-  return BODY_METHODS.includes(method);
-}
-
 export function RequestBodyEditor({ method, value, onChange, disabled, error }: RequestBodyEditorProps) {
   if (!isBodyMethod(method)) return null;
-
-  const parsed = tryParseJson(value);
-  const isJson = parsed !== null;
-  const displayValue = isJson ? prettyPrintJson(parsed!.parsed) : value;
 
   return (
     <div>
@@ -39,7 +24,7 @@ export function RequestBodyEditor({ method, value, onChange, disabled, error }: 
         }`}
       >
         <textarea
-          value={displayValue}
+          value={value}
           onChange={(e) => onChange(e.target.value)}
           disabled={disabled}
           spellCheck={false}

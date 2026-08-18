@@ -7,7 +7,7 @@ import { LatencyAnalytics } from '@/components/LatencyAnalytics';
 import { runSimulation } from '@/api/simulationClient';
 import { validateTargetUrl } from '@/utils/validateUrl';
 import { useRequestHistory } from '@/hooks/useRequestHistory';
-import { DEFAULT_BODY, isBodyMethod } from '@/components/RequestBodyEditor';
+import { DEFAULT_BODY, isBodyMethod } from '@/utils/requestBody';
 import { tryParseJson } from '@/utils/format';
 import type { Scenario, HttpMethod, SimulationResult, ApiError } from '@/types';
 
