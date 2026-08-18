@@ -4,6 +4,12 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 import { runSimulation } from '../server/simulationEngine.js';
 import { ValidationError } from '../server/validateUrl.js';
 
+const dnsMocks = vi.hoisted(() => ({
+  lookup: vi.fn(),
+}));
+
+vi.mock('node:dns/promises', () => dnsMocks);
+
 interface ObservedRequest {
   method: string;
   path: string;
@@ -90,6 +96,8 @@ beforeEach(() => {
   observedRequests = [];
   slowUpstreamResponseObserved = false;
   fetchBridge.mockClear();
+  dnsMocks.lookup.mockReset();
+  dnsMocks.lookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
 });
 
 afterAll(async () => {
@@ -106,6 +114,20 @@ afterAll(async () => {
 });
 
 describe('runSimulation upstream requests', () => {
+  it('rejects a hostname resolving to a non-public address before fetch', async () => {
+    dnsMocks.lookup.mockResolvedValue([{ address: '127.0.0.1', family: 4 }]);
+
+    await expect(
+      runSimulation({
+        url: `${upstreamOrigin}/echo`,
+        scenario: 'normal',
+        delay: 0,
+        method: 'GET',
+      }),
+    ).rejects.toThrow(ValidationError);
+    expect(fetchBridge).not.toHaveBeenCalled();
+  });
+
   it.each(['GET', 'POST', 'PUT', 'PATCH', 'DELETE'])('forwards %s requests', async (method) => {
     const requestBody = bodyMethods.has(method) ? { method, value: 42 } : undefined;
     const result = await runSimulation({
@@ -224,6 +246,7 @@ describe('runSimulation local scenarios', () => {
 
     expect(result).toMatchObject({ status, statusText, ok: false, scenario, simulated: true });
     expect(fetchBridge).not.toHaveBeenCalled();
+    expect(dnsMocks.lookup).not.toHaveBeenCalled();
     expect(observedRequests).toHaveLength(0);
   });
 

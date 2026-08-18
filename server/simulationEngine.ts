@@ -1,4 +1,4 @@
-import { validateTargetUrl, ValidationError } from './validateUrl.js';
+import { validateTargetUrl, validateTargetUrlDns, ValidationError } from './validateUrl.js';
 
 export type Scenario = 'normal' | '404' | '429' | '500' | 'slow';
 
@@ -255,6 +255,11 @@ export async function runSimulation(req: SimulationRequest): Promise<SimulationR
   }
 
   // normal and slow both call the real upstream
+  const dnsValidation = await validateTargetUrlDns(endpoint);
+  if (!dnsValidation.ok) {
+    throw new ValidationError(dnsValidation.reason || 'Invalid URL.');
+  }
+
   try {
     const upstream = await fetchUpstream(endpoint, method, bodyString, hasBody);
     if (scenario === 'slow') {

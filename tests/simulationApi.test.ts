@@ -8,6 +8,10 @@ import {
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest';
 import { simulationMiddleware } from '../server/plugin.js';
 
+const dnsLookup = vi.hoisted(() => vi.fn());
+
+vi.mock('node:dns/promises', () => ({ lookup: dnsLookup }));
+
 interface ApiResponse {
   status: number;
   headers: IncomingHttpHeaders;
@@ -83,6 +87,8 @@ beforeAll(async () => {
 
 beforeEach(() => {
   upstreamFetch.mockReset();
+  dnsLookup.mockReset();
+  dnsLookup.mockResolvedValue([{ address: '93.184.216.34', family: 4 }]);
   upstreamFetch.mockResolvedValue(
     new Response(JSON.stringify({ source: 'local test upstream' }), {
       status: 200,
